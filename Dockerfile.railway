@@ -62,9 +62,19 @@ WORKDIR /app
 # Copy built app
 COPY --from=build /app /app
 
-# Create data directories
+# Install agent CLIs globally
+RUN npm install --global --omit=dev \
+  @anthropic-ai/claude-code@latest \
+  @openai/codex@latest \
+  @google/gemini-cli@latest
+
+# Create data directories + agent workspaces
 RUN mkdir -p /paperclip/instances/default \
   && mkdir -p /paperclip/tailscale \
+  && mkdir -p /paperclip/workspaces/ceo \
+  && mkdir -p /paperclip/workspaces/cto \
+  && mkdir -p /paperclip/workspaces/engineer-1 \
+  && mkdir -p /paperclip/workspaces/engineer-2 \
   && mkdir -p /var/log/supervisor \
   && mkdir -p /etc/supervisor/conf.d \
   && mkdir -p /var/run/tailscale \
