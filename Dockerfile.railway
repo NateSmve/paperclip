@@ -90,7 +90,7 @@ stderr_logfile=/dev/fd/2
 stderr_logfile_maxbytes=0
 
 [program:tailscale-up]
-command=/bin/sh -c "sleep 3 && /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock up --authkey=${TS_AUTHKEY} --hostname=${TS_HOSTNAME:-paperclip} --accept-routes && /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock serve --bg --https=443 http://127.0.0.1:3100"
+command=/bin/sh -c "sleep 3 && /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock up --authkey=${TS_AUTHKEY} --hostname=${TS_HOSTNAME:-paperclip} --accept-routes && /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock serve reset && /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock serve --bg --https=443 http://127.0.0.1:3100"
 autostart=true
 autorestart=false
 startsecs=0
