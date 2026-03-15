@@ -1,0 +1,111 @@
+###############################################################################
+# Paperclip — vanilla stock build for Railway
+# Follows upstream Dockerfile conventions. No supervisord, no Tailscale.
+# Tailscale runs as a separate Railway service.
+###############################################################################
+
+# ── Stage 1: base ────────────────────────────────────────────────────────────
+FROM node:lts-trixie-slim AS base
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl git \
+  && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+
+# ── Stage 2: deps — install node_modules from lockfile ───────────────────────
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY cli/package.json cli/
+COPY server/package.json server/
+COPY ui/package.json ui/
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY packages/adapter-utils/package.json packages/adapter-utils/
+COPY packages/adapters/claude-local/package.json packages/adapters/claude-local/
+COPY packages/adapters/codex-local/package.json packages/adapters/codex-local/
+COPY packages/adapters/cursor-local/package.json packages/adapters/cursor-local/
+COPY packages/adapters/gemini-local/package.json packages/adapters/gemini-local/
+COPY packages/adapters/openclaw-gateway/package.json packages/adapters/openclaw-gateway/
+COPY packages/adapters/opencode-local/package.json packages/adapters/opencode-local/
+COPY packages/adapters/pi-local/package.json packages/adapters/pi-local/
+RUN pnpm install --frozen-lockfile
+
+# ── Stage 3: build — full source, resolve remaining workspace pkgs ───────────
+FROM base AS build
+WORKDIR /app
+COPY --from=deps /app /app
+COPY . .
+RUN pnpm install --no-frozen-lockfile \
+ && pnpm --filter @paperclipai/shared build \
+ && pnpm --filter @paperclipai/plugin-sdk build \
+ && pnpm --filter @paperclipai/ui build \
+ && pnpm --filter @paperclipai/server build \
+ && test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+
+# ── Stage 4: production — stock Paperclip ────────────────────────────────────
+FROM base AS production
+WORKDIR /app
+COPY --chown=node:node --from=build /app /app
+
+# Install agent CLIs
+RUN npm install --global --omit=dev \
+  @anthropic-ai/claude-code@latest \
+  @openai/codex@latest \
+  @google/gemini-cli@latest
+
+# Create data + workspace directories
+RUN mkdir -p /paperclip/instances/default \
+  && mkdir -p /paperclip/workspaces/ceo \
+  && mkdir -p /paperclip/workspaces/cto \
+  && mkdir -p /paperclip/workspaces/engineer-1 \
+  && mkdir -p /paperclip/workspaces/engineer-2 \
+  && chown -R node:node /paperclip /app
+
+# Entrypoint: fix volume ownership + IPv4 resolution for Supabase
+COPY <<'ENTRY' /usr/local/bin/entrypoint.sh
+#!/bin/sh
+set -e
+
+# Fix volume ownership (Railway volumes mount as root)
+chown -R node:node /paperclip
+
+# Clean up corrupt/partial embedded db init from prior failed boots
+DB_DIR="/paperclip/instances/default/db"
+if [ -d "$DB_DIR" ] && [ ! -f "$DB_DIR/PG_VERSION" ]; then
+  echo "[entrypoint] Removing incomplete db directory: $DB_DIR"
+  rm -rf "$DB_DIR"
+fi
+
+# Resolve Supabase host to IPv4 (Railway has no IPv6 outbound)
+if [ -n "$DATABASE_URL" ] && echo "$DATABASE_URL" | grep -q 'supabase'; then
+  SUPA_HOST=$(echo "$DATABASE_URL" | sed -n 's|.*@\([^:/]*\)[:/].*|\1|p')
+  if [ -n "$SUPA_HOST" ]; then
+    SUPA_IPV4=$(getent ahostsv4 "$SUPA_HOST" 2>/dev/null | head -1 | awk '{print $1}')
+    if [ -n "$SUPA_IPV4" ]; then
+      export DATABASE_URL=$(echo "$DATABASE_URL" | sed "s|$SUPA_HOST|$SUPA_IPV4|g")
+      echo "[entrypoint] Resolved $SUPA_HOST -> $SUPA_IPV4"
+    else
+      echo "[entrypoint] WARNING: could not resolve $SUPA_HOST to IPv4"
+    fi
+  fi
+fi
+
+# Drop to node user and run Paperclip
+exec su -s /bin/sh node -c 'exec node --dns-result-order=ipv4first --import ./server/node_modules/tsx/dist/loader.mjs server/dist/index.js'
+ENTRY
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENV NODE_ENV=production \
+  HOME=/paperclip \
+  HOST=0.0.0.0 \
+  PORT=3100 \
+  SERVE_UI=true \
+  PAPERCLIP_HOME=/paperclip \
+  PAPERCLIP_INSTANCE_ID=default \
+  PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
+  PAPERCLIP_DEPLOYMENT_MODE=authenticated \
+  PAPERCLIP_DEPLOYMENT_EXPOSURE=private
+
+EXPOSE 3100
+
+CMD ["/usr/local/bin/entrypoint.sh"]
