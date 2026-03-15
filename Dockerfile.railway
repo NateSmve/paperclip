@@ -111,7 +111,16 @@ RUN mkdir -p /var/run/tailscale
 # Startup script: fix volume ownership then launch supervisord
 COPY <<'ENTRY' /usr/local/bin/entrypoint.sh
 #!/bin/sh
+# Fix volume ownership
 chown -R node:node /paperclip
+
+# Clean up corrupt/partial db init from prior failed boots
+DB_DIR="/paperclip/instances/default/db"
+if [ -d "$DB_DIR" ] && [ ! -f "$DB_DIR/PG_VERSION" ]; then
+  echo "[entrypoint] Removing incomplete db directory: $DB_DIR"
+  rm -rf "$DB_DIR"
+fi
+
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
 ENTRY
 RUN chmod +x /usr/local/bin/entrypoint.sh
