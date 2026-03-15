@@ -59,7 +59,8 @@ COPY --from=build /app /app
 RUN mkdir -p /paperclip/instances/default \
   && mkdir -p /paperclip/tailscale \
   && mkdir -p /var/log/supervisor \
-  && mkdir -p /etc/supervisor/conf.d
+  && mkdir -p /etc/supervisor/conf.d \
+  && chown -R node:node /paperclip /app
 
 # ── supervisord config ───────────────────────────────────────────────────────
 COPY <<'EOF' /etc/supervisor/conf.d/supervisord.conf
@@ -94,6 +95,7 @@ stderr_logfile_maxbytes=0
 [program:paperclip]
 command=node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/index.js
 directory=/app
+user=node
 autostart=true
 autorestart=true
 priority=30
@@ -106,6 +108,14 @@ EOF
 
 RUN mkdir -p /var/run/tailscale
 
+# Startup script: fix volume ownership then launch supervisord
+COPY <<'ENTRY' /usr/local/bin/entrypoint.sh
+#!/bin/sh
+chown -R node:node /paperclip
+exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+ENTRY
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 EXPOSE 3100
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+CMD ["/usr/local/bin/entrypoint.sh"]
