@@ -1,0 +1,112 @@
+###############################################################################
+# Paperclip — all-in-one Railway container
+# Bundles: Paperclip (Node + embedded Postgres) + Tailscale (userspace)
+# Managed by supervisord. No TUN device required.
+###############################################################################
+
+# ── Stage 1: base ────────────────────────────────────────────────────────────
+FROM node:lts-trixie-slim AS base
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl git \
+  && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+
+# ── Stage 2: deps ────────────────────────────────────────────────────────────
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY cli/package.json cli/
+COPY server/package.json server/
+COPY ui/package.json ui/
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY packages/adapter-utils/package.json packages/adapter-utils/
+COPY packages/adapters/claude-local/package.json packages/adapters/claude-local/
+COPY packages/adapters/codex-local/package.json packages/adapters/codex-local/
+COPY packages/adapters/cursor-local/package.json packages/adapters/cursor-local/
+COPY packages/adapters/gemini-local/package.json packages/adapters/gemini-local/
+COPY packages/adapters/openclaw-gateway/package.json packages/adapters/openclaw-gateway/
+COPY packages/adapters/opencode-local/package.json packages/adapters/opencode-local/
+COPY packages/adapters/pi-local/package.json packages/adapters/pi-local/
+COPY packages/plugins/sdk/package.json packages/plugins/sdk/
+COPY packages/plugins/create-paperclip-plugin/package.json packages/plugins/create-paperclip-plugin/
+RUN pnpm install --frozen-lockfile
+
+# ── Stage 3: build ───────────────────────────────────────────────────────────
+FROM base AS build
+WORKDIR /app
+COPY --from=deps /app /app
+COPY . .
+RUN pnpm --filter @paperclipai/shared build
+RUN pnpm --filter @paperclipai/plugin-sdk build
+RUN pnpm --filter @paperclipai/ui build
+RUN pnpm --filter @paperclipai/server build
+RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+
+# ── Stage 4: production ─────────────────────────────────────────────────────
+FROM base AS production
+WORKDIR /app
+
+# Install supervisord + Tailscale
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends supervisor iptables \
+  && curl -fsSL https://tailscale.com/install.sh | sh \
+  && rm -rf /var/lib/apt/lists/*
+
+# Copy built app
+COPY --from=build /app /app
+
+# Create data directories
+RUN mkdir -p /paperclip/instances/default \
+  && mkdir -p /paperclip/tailscale \
+  && mkdir -p /var/log/supervisor \
+  && mkdir -p /etc/supervisor/conf.d
+
+# ── supervisord config ───────────────────────────────────────────────────────
+COPY <<'EOF' /etc/supervisor/conf.d/supervisord.conf
+[supervisord]
+nodaemon=true
+user=root
+logfile=/var/log/supervisor/supervisord.log
+logfile_maxbytes=10MB
+pidfile=/var/run/supervisord.pid
+
+[program:tailscaled]
+command=/usr/sbin/tailscaled --tun=userspace-networking --statedir=/paperclip/tailscale --socket=/var/run/tailscale/tailscaled.sock
+autostart=true
+autorestart=true
+priority=10
+stdout_logfile=/dev/fd/1
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/fd/2
+stderr_logfile_maxbytes=0
+
+[program:tailscale-up]
+command=/bin/sh -c "sleep 3 && /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock up --authkey=${TS_AUTHKEY} --hostname=${TS_HOSTNAME:-paperclip} --accept-routes && /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock serve --bg --https=443 http://127.0.0.1:3100"
+autostart=true
+autorestart=false
+startsecs=0
+priority=20
+stdout_logfile=/dev/fd/1
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/fd/2
+stderr_logfile_maxbytes=0
+
+[program:paperclip]
+command=node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/index.js
+directory=/app
+autostart=true
+autorestart=true
+priority=30
+stdout_logfile=/dev/fd/1
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/fd/2
+stderr_logfile_maxbytes=0
+environment=NODE_ENV="production",HOME="/paperclip",HOST="0.0.0.0",PORT="3100",SERVE_UI="true",PAPERCLIP_HOME="/paperclip",PAPERCLIP_INSTANCE_ID="default",PAPERCLIP_CONFIG="/paperclip/instances/default/config.json",PAPERCLIP_DEPLOYMENT_MODE="authenticated",PAPERCLIP_DEPLOYMENT_EXPOSURE="private"
+EOF
+
+RUN mkdir -p /var/run/tailscale
+
+EXPOSE 3100
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

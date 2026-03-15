@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+.git
+.github
+.pnpm-store
+coverage
+*.log
+.paperclip
+tests
+docs
+doc
+report
+.changeset
