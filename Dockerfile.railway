@@ -111,7 +111,6 @@ stdout_logfile=/dev/fd/1
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/fd/2
 stderr_logfile_maxbytes=0
-environment=NODE_ENV="production",HOME="/paperclip",HOST="0.0.0.0",PORT="3100",SERVE_UI="true",PAPERCLIP_HOME="/paperclip",PAPERCLIP_INSTANCE_ID="default",PAPERCLIP_CONFIG="/paperclip/instances/default/config.json",PAPERCLIP_DEPLOYMENT_MODE="authenticated",PAPERCLIP_DEPLOYMENT_EXPOSURE="private"
 EOF
 
 # ── Entrypoint: fix volume ownership + clean bad state ───────────────────────
@@ -125,6 +124,20 @@ DB_DIR="/paperclip/instances/default/db"
 if [ -d "$DB_DIR" ] && [ ! -f "$DB_DIR/PG_VERSION" ]; then
   echo "[entrypoint] Removing incomplete db directory: $DB_DIR"
   rm -rf "$DB_DIR"
+fi
+
+# Resolve Supabase host to IPv4 (Railway has no IPv6 outbound)
+if [ -n "$DATABASE_URL" ] && echo "$DATABASE_URL" | grep -q 'supabase'; then
+  SUPA_HOST=$(echo "$DATABASE_URL" | sed -n 's|.*@\([^:/]*\)[:/].*|\1|p')
+  if [ -n "$SUPA_HOST" ]; then
+    SUPA_IPV4=$(getent ahostsv4 "$SUPA_HOST" 2>/dev/null | head -1 | awk '{print $1}')
+    if [ -n "$SUPA_IPV4" ]; then
+      export DATABASE_URL=$(echo "$DATABASE_URL" | sed "s|$SUPA_HOST|$SUPA_IPV4|g")
+      echo "[entrypoint] Resolved $SUPA_HOST -> $SUPA_IPV4"
+    else
+      echo "[entrypoint] WARNING: could not resolve $SUPA_HOST to IPv4"
+    fi
+  fi
 fi
 
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
