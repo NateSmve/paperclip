@@ -1,0 +1,48 @@
+###############################################################################
+# Tailscale sidecar for Railway
+# Proxies HTTPS from tailnet to the Paperclip service via Railway internal DNS.
+# No TUN device — uses userspace networking.
+###############################################################################
+
+FROM debian:trixie-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl iptables \
+  && curl -fsSL https://tailscale.com/install.sh | sh \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /tailscale /var/run/tailscale
+
+COPY <<'ENTRY' /usr/local/bin/entrypoint.sh
+#!/bin/sh
+set -e
+
+PAPERCLIP_URL="${PAPERCLIP_INTERNAL_URL:-http://Paperclip.railway.internal:3100}"
+TS_STATE_DIR="/tailscale"
+TS_SOCK="/var/run/tailscale/tailscaled.sock"
+
+echo "[tailscale] Starting tailscaled (userspace networking)..."
+tailscaled --tun=userspace-networking --statedir="$TS_STATE_DIR" --socket="$TS_SOCK" &
+TSPID=$!
+
+# Wait for tailscaled to be ready
+sleep 3
+
+echo "[tailscale] Authenticating and configuring..."
+tailscale --socket="$TS_SOCK" up \
+  --authkey="${TS_AUTHKEY}" \
+  --hostname="${TS_HOSTNAME:-paperclip}" \
+  --accept-routes
+
+echo "[tailscale] Setting up HTTPS serve proxy -> $PAPERCLIP_URL"
+tailscale --socket="$TS_SOCK" serve reset
+tailscale --socket="$TS_SOCK" serve --bg --https=443 "$PAPERCLIP_URL"
+
+echo "[tailscale] Ready. Proxying https://${TS_HOSTNAME:-paperclip}.* -> $PAPERCLIP_URL"
+
+# Keep running — follow tailscaled
+wait $TSPID
+ENTRY
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+CMD ["/usr/local/bin/entrypoint.sh"]
